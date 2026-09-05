@@ -1,0 +1,6 @@
+build/
+gov/gov.db
+gov/__pycache__/
+__pycache__/
+*.jks
+*.creds

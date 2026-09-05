@@ -1,0 +1,88 @@
+name: ci
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+  repository_dispatch: { types: [build-apk, gov-sync] }
+permissions: { contents: read }
+env:
+  PROJ: contador
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+  build:
+    needs: tests
+    runs-on: ubuntu-latest
+    outputs: { has_apk: "${{ steps.h.outputs.has_apk }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - id: h
+        run: |
+          make apk
+          if [ -f build/unsigned.apk ]; then make verify; echo "has_apk=1" >> "$GITHUB_OUTPUT"; else echo "has_apk=0" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@v4
+        if: steps.h.outputs.has_apk == '1'
+        with: { name: unsigned-release, path: build/unsigned.apk, if-no-files-found: error }
+  sign:
+    needs: build
+    if: needs.build.outputs.has_apk == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: unsigned-release, path: apk/ }
+      - run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > k.jks
+          BT=$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -1)
+          f=apk/unsigned.apk
+          "$BT/zipalign" -f 4 "$f" "$f.aligned"
+          "$BT/apksigner" sign --ks k.jks --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --ks-key-alias "${{ secrets.KEY_ALIAS }}" --key-pass "pass:${{ secrets.KEY_PASSWORD }}" "$f.aligned"
+          mv "$f.aligned" "$f"
+          "$BT/apksigner" verify --print-certs "$f"
+      - uses: actions/upload-artifact@v4
+        with: { name: apk-signed, path: apk/unsigned.apk }
+  dist:
+    needs: sign
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: apk-signed, path: out/ }
+      - uses: actions/checkout@v4
+        with:
+          repository: camillanapoles/apk-vault
+          ssh-key: ${{ secrets.VAULT_SSH_KEY }}
+          path: vault
+          ref: main
+      - run: |
+          cd vault
+          git config user.name apk-factory && git config user.email actions@users.noreply.github.com
+          git pull --rebase origin main || true
+          mkdir -p "$PROJ"
+          cp ../out/unsigned.apk "$PROJ/${PROJ}-${GITHUB_SHA:0:7}-release.apk"
+          sha256sum "../out/unsigned.apk" | cut -d' ' -f1 > "$PROJ/${PROJ}-${GITHUB_SHA:0:7}-release.apk.sha256"
+          git add -A && git commit -m "$PROJ: ${GITHUB_SHA:0:7}" && git push origin main
+        env: { PROJ: "${{ env.PROJ }}" }
+  report:
+    needs: [tests, build, sign, dist]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          V=SUCCESS
+          [ "${{ needs.tests.conclusion }}" = success ] || V=FAIL
+          [ "${{ needs.build.conclusion }}" = success ] || V=FAIL
+          [ "${{ needs.sign.conclusion }}" = skipped ] || [ "${{ needs.sign.conclusion }}" = success ] || V=FAIL
+          [ "${{ needs.dist.conclusion }}" = skipped ] || [ "${{ needs.dist.conclusion }}" = success ] || V=FAIL
+          mkdir -p docs/reports
+          printf 'run: %s\nsha: %s\nverdict: %s\ntests: %s\nbuild: %s\nsign: %s\ndist: %s\nts: %s\n' \
+            "${GITHUB_RUN_ID}" "${GITHUB_SHA:0:7}" "$V" "${{ needs.tests.conclusion }}" \
+            "${{ needs.build.conclusion }}" "${{ needs.sign.conclusion }}" \
+            "${{ needs.dist.conclusion }}" "$(date -u +%FT%TZ)" \
+            > "docs/reports/status-${GITHUB_RUN_ID}.txt"
+          git config user.name apk-factory && git config user.email actions@users.noreply.github.com
+          git add -A && (git commit -m "report: run ${GITHUB_RUN_ID} ${V} [skip ci]" && git push) || echo "nada a commitar"

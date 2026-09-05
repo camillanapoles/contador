@@ -3,13 +3,14 @@ BT ?= $(lastword $(sort $(wildcard $(SDK)/build-tools/*)))
 PLATFORM ?= $(lastword $(sort $(wildcard $(SDK)/platforms/android-*/android.jar)))
 SRC := $(shell find src -name '*.java' 2>/dev/null)
 
-.PHONY: test verify apk gov
+.PHONY: test verify apk _apk gov
 test:
 	@for t in tests/pre/T-*.sh; do [ -e "$$t" ] || continue; bash "$$t" || exit 1; done
 verify:
 	@for t in tests/post/T-*.sh; do [ -e "$$t" ] || continue; bash "$$t" || exit 1; done
 apk:
-	@if [ -z "$(SRC)" ]; then echo "sem src/ — build adiado (etapas iniciais)"; exit 0; fi
+	@if [ -z "$(SRC)" ]; then echo "sem src/ — build adiado (etapas iniciais)"; else $(MAKE) _apk; fi
+_apk:
 	rm -rf build && mkdir -p build/classes build/dex build/gen
 	$(BT)/aapt2 compile --dir app/res -o build/res.zip
 	$(BT)/aapt2 link -o build/unsigned.apk -I $(PLATFORM) \
